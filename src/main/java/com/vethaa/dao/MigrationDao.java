@@ -13,7 +13,6 @@ public class MigrationDao<T> {
 	
 	@Transactional
 	public void save(T productionSection) {
-		System.out.println("test");
 		sessionFactory.getCurrentSession().persist(productionSection);
 	}
 }

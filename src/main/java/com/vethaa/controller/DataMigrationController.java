@@ -2,6 +2,7 @@ package com.vethaa.controller;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
+import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -59,31 +60,16 @@ public class DataMigrationController {
 		}
 	}
 
-	@GetMapping("democsv")
-	public String migrateData() throws IOException {
-		try {
-			String filePath = "C:/Users/gerli/Desktop/Vetha/csv/prod_section.csv";
-			dataMigrationService.migrateData(filePath);
-			return "SUCCESS";
-
-		} catch (Exception e) {
-			e.printStackTrace();
-			return "FAILURE | " + e.toString();
-		}
-
-	}
 
 	@GetMapping("democsvadv")
-	public String migrateDataAdv() throws IOException {
+	public Map<String, String> migrateDataAdv() throws IOException {
 		try {
-			String filePath = "C:/Users/gerli/Desktop/Vetha/csv/production_section.csv";
-//			String filePath = "C:/Users/gerli/Desktop/Vetha/csv/product_group.csv";
-			String message = dataMigrationService.migrateDataGeneric(filePath);
+			Map<String, String> message = dataMigrationService.migrateDataGeneric();
 			return message;
 
 		} catch (Exception e) {
 			e.printStackTrace();
-			return "FAILURE";
+			return null;
 		}
 
 	}

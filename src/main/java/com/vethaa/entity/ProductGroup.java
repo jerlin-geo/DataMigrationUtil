@@ -24,7 +24,7 @@ import lombok.ToString;
 public class ProductGroup {
 
 	@Id
-	@GeneratedValue(strategy = GenerationType.IDENTITY)
+//	@GeneratedValue(strategy = GenerationType.IDENTITY)
 	@Column(name = "product_Group_ID")
 	private Integer productGroupId;
 
