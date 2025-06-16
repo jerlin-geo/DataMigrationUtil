@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.vethaa.dao.MigrationDao;
+import com.vethaa.entity.Organization;
 import com.vethaa.entity.ProductGroup;
 import com.vethaa.entity.ProductionSection;
 import com.vethaa.service.DataMigrationService;
@@ -28,7 +29,9 @@ public class DataMigrationController {
 			ProductionSection productionSection = new ProductionSection();
 //			productionSection.setSectionId(1);
 			productionSection.setSectionName(null);
-			productionSection.setVendorId(2);
+			Organization organiation = new Organization();
+			organiation.setOrgId(2);
+			productionSection.setOrgId(organiation);
 			productionSection.setCreatedBy(1);
 			productionSection.setModifiedDate(LocalDateTime.now());
 			dataMigrationService.save(productionSection);

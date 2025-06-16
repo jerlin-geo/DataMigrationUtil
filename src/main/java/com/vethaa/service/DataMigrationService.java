@@ -1,12 +1,16 @@
 package com.vethaa.service;
 
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -17,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -31,6 +36,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import com.vethaa.dao.MigrationDao;
+import com.vethaa.util.Constants;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -42,187 +48,210 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 @Slf4j
 public class DataMigrationService {
-	
+
 	@Autowired
 	MigrationDao migrationDao;
-	
+
 	@Value("${util.csv.folder.read.path}")
 	private String csvReadFolderPath;
-	
+
 	@Value("${util.csv.folder.write.path}")
 	private String csvWriteFolderPath;
 	
+	@Value("${util.master.file.path}")
+	private String masterFilePath;
+
 	@Value("${util.entity.package}")
 	private String entityPackage;
 
 	public Map<String, String> migrateDataGeneric() throws Exception {
-		Map<String, String> fileStatusMap = new HashMap<>();
-		File folder = new File(csvReadFolderPath);
-		File[] files = folder.listFiles();
-
-		for (File file : files) {
-		    if (file.isFile()) {
-		    	log.info("<-------------> START <-------------> {} <-------------> START <------------->", file.getName());
-		    	try {
-		    		String status = processFile(file);
-		    		fileStatusMap.put(file.getName(), status);
-				} catch (Exception e) {
-					fileStatusMap.put(file.getName(),"FAILURE - " + e.getMessage());
-				}
-		    	log.info("<--------------> END <--------------> {} <--------------> END <-------------->", file.getName());
-
-		    }
-		}
+		Map<String, String> fileStatusMap = new LinkedHashMap<>();
 		
+		List<String> fileNames = getOrderedFileList(masterFilePath);
+
+		for (String fileName : fileNames) {
+			log.info("<----------> START <----------> {} <----------> START <---------->", fileName);
+			try {
+				Path filePath = Paths.get(csvReadFolderPath, fileName);
+				if (Files.exists(filePath)) {
+					String status = processFile(filePath.toFile());
+					fileStatusMap.put(fileName, status);
+					if (status != Constants.PROCESS_SUCCESS)
+						return fileStatusMap;
+				} else {
+					fileStatusMap.put(fileName, Constants.FILE_NOT_FOUND);
+					return fileStatusMap;
+				}
+				log.info("<-----------> END <-----------> {} <-----------> END <----------->", fileName);
+			} catch (Exception e) {
+				fileStatusMap.put(fileName, Constants.FAILURE + " - " + e.getMessage());
+				return fileStatusMap;
+			}
+		}
+
 		return fileStatusMap;
 	}
-	
+
 	private String processFile(File file) throws Exception {
 		log.info("READING DATA FROM FILE -> {}", file.getName());
-        Reader reader = new FileReader(file);
+		Reader reader = new FileReader(file);
 		CSVParser parser = CSVFormat.Builder.create()
-                .setHeader()
-                .setSkipHeaderRecord(true)
-                .get()
-                .parse(reader);
-		
+				.setHeader()
+				.setSkipHeaderRecord(true)
+				.get()
+				.parse(reader);
+
 		String tableName = file.getName().split("\\.")[0];
 		Class<?> entityClass = findEntityClass(entityPackage, tableName);
-		if (entityClass == null) {
-			log.error("Java entity not found for table name - {}", tableName);
-			throw new Exception("Entity for table name '" + tableName + "' not found");
-		}
 
 		log.info("Table headers(column name) parsed from csv file - {}", parser.getHeaderNames());
 		log.info("Iterating csv records in file");
-		Map<CSVRecord, Object> csvRecordEntityObjMap = convertFileDataToEntity(parser, entityClass);
-		log.info("FILE READ SUCCESFULLY | TOTAL RECORDS : {}", csvRecordEntityObjMap.size());
-		
-        Map<CSVRecord, String> failedRecordErroMsgMap = saveToDb(csvRecordEntityObjMap);
-		log.info("FAILED RECORDS COUNT : {}", failedRecordErroMsgMap.keySet().size());
-		
-		generateCsvFailedEntries(failedRecordErroMsgMap, parser.getHeaderNames(), file.getName());
-		
-		if (failedRecordErroMsgMap.keySet().isEmpty()) {
-			return "ALL DATA INSERTED";
-		} else if (failedRecordErroMsgMap.keySet().size() == csvRecordEntityObjMap.size()) {
-			return "NO DATA INSERTED";
-		} else {
-			return "PARTIAL DATA INSERTED";
-		}
+		return processData(parser, entityClass, file);
 	}
 
-	private void generateCsvFailedEntries(Map<CSVRecord, String> failedRecordErroMsgMap, List<String> csvHeaders, String fileName) throws IOException {
+	private void generateCsvFailedEntries(Map<CSVRecord, String> failedRecordErroMsgMap, List<String> csvHeaders,
+			String fileName) throws IOException {
 		if (!failedRecordErroMsgMap.keySet().isEmpty()) {
-			Writer writer = Files.newBufferedWriter(Paths.get(csvWriteFolderPath + FilenameUtils.getBaseName(fileName) + "_failed.csv"));
+			Writer writer = Files.newBufferedWriter(Paths.get(csvWriteFolderPath + FilenameUtils.getBaseName(fileName) + ".csv"));
 			CSVFormat csvWriteFormat = CSVFormat.Builder.create()
 					.setHeader(csvHeaders.toArray(new String[0]))
-					.setQuoteMode(QuoteMode.ALL)
 					.setDelimiter(',')
 					.get();
 			CSVPrinter csvPrinter = new CSVPrinter(writer, csvWriteFormat);
-			
 			for (CSVRecord csvRecord : failedRecordErroMsgMap.keySet()) {
 				csvPrinter.printRecord(csvRecord);
 			}
-			csvPrinter.flush();
 			csvPrinter.close();
+			
+		    try (BufferedWriter bufferWriter = new BufferedWriter(new FileWriter(csvWriteFolderPath + FilenameUtils.getBaseName(fileName) + "_error_msg.txt"))) {
+		        for (Entry<CSVRecord, String> entry : failedRecordErroMsgMap.entrySet()) {
+		            String line = entry.getKey() + " : " + entry.getValue();
+		            bufferWriter.write(line);
+		            bufferWriter.newLine();
+		        }
+		    } catch (IOException e) {
+		        e.printStackTrace();
+		    }
 		}
-		
 	}
 
-	private Map<CSVRecord, String> saveToDb(Map<CSVRecord, Object> csvRecordEntityObjMap) {
-		log.info("Persisiting data ...");
+	private String processData(CSVParser parser, Class<?> entityClass, File file) throws Exception {
 		Map<CSVRecord, String> failedRecordErroMsgMap = new HashMap<>();
-		for (Entry<CSVRecord, Object> entry : csvRecordEntityObjMap.entrySet()) {
-			try {
-				migrationDao.save(entry.getValue());
-			} catch (Exception e) {
-				failedRecordErroMsgMap.put(entry.getKey(), e.toString());
-			}
+		int count = 0;
+		for (CSVRecord record : parser.getRecords()) {
+			Object entityObj = mapEntityFields(entityClass, record, parser.getHeaderNames());
+			saveToDb(record, entityObj, failedRecordErroMsgMap);
+			logCount(++count);
+		}
+
+		log.info("FILE PROCESSED SUCCESFULLY | TOTAL RECORDS : {}", count);
+		log.info("FAILED RECORDS COUNT : {}", failedRecordErroMsgMap.size());
+
+		generateCsvFailedEntries(failedRecordErroMsgMap, parser.getHeaderNames(), file.getName());
+
+		if (failedRecordErroMsgMap.isEmpty()) {
+			return Constants.PROCESS_SUCCESS;
+		} else if (failedRecordErroMsgMap.size() == count) {
+			return Constants.NO_DATA_INSERTED;
+		} else {
+			return Constants.PARTIAL_DATA_INSERTED;
+		}
+	}
+
+	private Map<CSVRecord, String> saveToDb(CSVRecord record, Object entityObj, Map<CSVRecord, String> failedRecordErroMsgMap) {
+		log.info("Persisiting data ...");
+		try {
+			migrationDao.save(entityObj);
+		} catch (Exception e) {
+			failedRecordErroMsgMap.put(record, e.toString());
 		}
 		log.info("Data saved");
 		return failedRecordErroMsgMap;
 	}
 
-	private Map<CSVRecord, Object> convertFileDataToEntity(CSVParser parser, Class<?> entityClass) throws Exception {
-		Map<CSVRecord, Object> csvRecordEntityObjMap = new HashMap<>();
-		for (CSVRecord record : parser.getRecords()) {
-			Object entityObj = entityClass.getDeclaredConstructor().newInstance();
-			
-			for (String csvHeader : parser.getHeaderNames()) {
-				boolean isFieldFound = false;
-				
-				for (Field field : entityClass.getDeclaredFields()) {
-					if (field.isAnnotationPresent(Column.class) && field.getAnnotation(Column.class).name().equalsIgnoreCase(csvHeader)) {
+	private Object mapEntityFields(Class<?> entityClass, CSVRecord record, List<String> headerNames) throws Exception {
+		Object entityObj = entityClass.getDeclaredConstructor().newInstance();
+		for (String csvHeader : headerNames) {
+			boolean isFieldFound = false;
+
+			for (Field field : entityClass.getDeclaredFields()) {
+
+				if (field.isAnnotationPresent(Column.class)) {
+					if (field.getAnnotation(Column.class).name().equalsIgnoreCase(csvHeader)) {
 						isFieldFound = true;
-						if (record.get(csvHeader) != null && StringUtils.isNotBlank(record.get(csvHeader))) {
-							setFieldValue(entityObj, field, record.get(csvHeader));
-						}
+						setFieldValue(entityObj, field, record.get(csvHeader));
 						break;
-						
-					} else if (field.isAnnotationPresent(JoinColumn.class) && field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase(csvHeader)) {
+					} else if (field.getAnnotation(Column.class).name().equalsIgnoreCase("orgInfo")) {
 						isFieldFound = true;
-						if (record.get(csvHeader) != null && StringUtils.isNotBlank(record.get(csvHeader))) {
-							Class<?> fkEntityClass = field.getType();
-							Object fkEntityObj = fkEntityClass.getDeclaredConstructor().newInstance();
-							for (Field fkField : fkEntityClass.getDeclaredFields()) {
-						        if (fkField.isAnnotationPresent(Id.class)) {
-						        	setFieldValue(fkEntityObj, fkField, record.get(csvHeader));
-									break;
-						        } else {
-						        	log.error("Field not found for column header (foreign key) -> {}", csvHeader);
-									throw new Exception("Cant able to find foreign entity id field for csv column header (foreign key) '" + csvHeader + "' in foreign entity -> " + fkEntityClass.getName());
-						        }
-							}
-							field.setAccessible(true);
-							field.set(entityObj, fkEntityObj);
-						}
+						setFieldValue(entityObj, field, "Vethaa");
 						break;
-					} else {
-						//TODO org entity , created by, org id , modified by
+					}
+
+				} else if (field.isAnnotationPresent(JoinColumn.class)) {
+					if (field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase(csvHeader)) {
+						isFieldFound = true;
+						setForeignFieldValue(field, entityObj, record.get(csvHeader), csvHeader);
+						break;
+					} else if (field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase("org_entity_Id")) {
+						isFieldFound = true;
+						setForeignFieldValue(field, entityObj, "2", "org_entity_Id");
+						break;
 					}
 				}
-				
-				if (!isFieldFound) {
-					log.error("Field not found for column header -> {}", csvHeader);
-					throw new Exception("Cant able to find entity field for csv column header '" + csvHeader + "' in entity -> " + entityClass.getName());
+			}
+
+			if (!isFieldFound) {
+				log.error("Field not found for column header -> {}", csvHeader);
+				throw new Exception("Cant able to identify entity field for csv column header name '" + csvHeader + "' in entity -> " + entityClass.getName());
+			}
+		}
+		return entityObj;
+	}
+
+	private void setForeignFieldValue(Field field, Object entityObj, String value, String csvHeader) throws Exception {
+		if (Objects.nonNull(value) && StringUtils.isNotBlank(value)) {
+			Class<?> fkEntityClass = field.getType();
+			Object fkEntityObj = fkEntityClass.getDeclaredConstructor().newInstance();
+			for (Field fkField : fkEntityClass.getDeclaredFields()) {
+				if (fkField.isAnnotationPresent(Id.class)) {
+					setFieldValue(fkEntityObj, fkField, value);
+					break;
 				}
 			}
-			csvRecordEntityObjMap.put(record, entityObj);
+			field.setAccessible(true);
+			field.set(entityObj, fkEntityObj);
 		}
-		return csvRecordEntityObjMap;
 	}
 
-	private void setFieldValue(Object entityObj, Field field, String value) throws IllegalArgumentException, IllegalAccessException {
-		field.setAccessible(true);
-		field.set(entityObj, convertDataType(value, field.getType()));
+	private void setFieldValue(Object entityObj, Field field, String value)
+			throws IllegalArgumentException, IllegalAccessException {
+		if (Objects.nonNull(value) && StringUtils.isNotBlank(value)) {
+			field.setAccessible(true);
+			field.set(entityObj, convertDataType(value, field.getType()));
+		}
 	}
 
-	private Class<?> findEntityClass(String packageName, String tableName) {
+	private Class<?> findEntityClass(String packageName, String tableName) throws Exception {
 		log.info("Searching java entities for the table name - {}", tableName);
 		Reflections reflections = new Reflections(packageName);
-        for (Class<?> clazz : reflections.getTypesAnnotatedWith(Entity.class)) {
-        	Table table = clazz.getAnnotation(Table.class);
-			if (table.name().equalsIgnoreCase(tableName)) {
-				log.info("Table entity found --> {}", clazz.getName());
-				return clazz;
-			}
-		}
-		return null;
+		Class<?> entityClass = reflections.getTypesAnnotatedWith(Entity.class).stream()
+				.filter(clazz -> clazz.getAnnotation(Table.class).name().equalsIgnoreCase(tableName)).findFirst()
+				.orElseThrow(() -> new Exception("Entity for table name '" + tableName + "' not found"));
+		log.info("Table entity found --> {}", entityClass.getName());
+		return entityClass;
 	}
 
 	private static Object convertDataType(String value, Class<?> type) {
 		if (type == String.class)
 			return value;
-		if (type == int.class || type == Integer.class)
-			return Integer.parseInt(value);
-		if (type == long.class || type == Long.class)
-			return Long.parseLong(value);
-		if (type == double.class || type == Double.class)
-			return Double.parseDouble(value);
-		if (type == boolean.class || type == Boolean.class)
-			return Boolean.parseBoolean(value);
+		if (type == Integer.class)
+			return Integer.valueOf(value);
+		if (type == Long.class)
+			return Long.valueOf(value);
+		if (type == Double.class)
+			return Double.valueOf(value);
+		if (type == Boolean.class)
+			return Boolean.valueOf(value);
 		if (type == LocalDate.class)
 			return LocalDate.parse(value, DateTimeFormatter.ofPattern("yyyy-MM-dd"));
 		if (type == LocalDateTime.class)
@@ -230,8 +259,44 @@ public class DataMigrationService {
 		return null;
 	}
 
+	private void logCount(int count) {
+		boolean shouldLog = false;
+		if (count < 10) {
+			shouldLog = true;
+		} else if (count <= 25 && count % 5 == 0) {
+			shouldLog = true;
+		} else if (count <= 400 && count % 50 == 0) {
+			shouldLog = true;
+		} else if (count <= 4000 && count % 250 == 0) {
+			shouldLog = true;
+		} else if (count <= 20000 && count % 1000 == 0) {
+			shouldLog = true;
+		} else if (count <= 75000 && count % 2500 == 0) {
+			shouldLog = true;
+		} else if (count % 100000 == 0) {
+			shouldLog = true;
+		}
+
+		if (shouldLog) {
+			log.info("Records processed {} ", count);
+		}
+	}
+
+	private static List<String> getOrderedFileList(String masterFilePath) throws IOException {
+		List<String> fileNames = new ArrayList<>();
+		try (BufferedReader br = new BufferedReader(new FileReader(masterFilePath))) {
+			String line = br.readLine();
+			while (line != null) {
+				fileNames.add(line.trim());
+				line = br.readLine();
+			}
+		}
+		fileNames.replaceAll(fileName -> fileName + ".csv");
+		return fileNames;
+	}
+
 	public <T> void save(T entity) {
 		migrationDao.save(entity);
-		
+
 	}
 }
