@@ -6,16 +6,13 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.io.Reader;
-import java.io.Writer;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,12 +20,6 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVPrinter;
-import org.apache.commons.csv.CSVRecord;
-import org.apache.commons.csv.QuoteMode;
-import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.reflections.Reflections;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,6 +27,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import com.vethaa.dao.MigrationDao;
+import com.vethaa.exception.AppException;
+import com.vethaa.util.AppUtil;
 import com.vethaa.util.Constants;
 
 import jakarta.persistence.Column;
@@ -67,6 +60,10 @@ public class DataMigrationService {
 	public Map<String, String> migrateDataGeneric() throws Exception {
 		Map<String, String> fileStatusMap = new LinkedHashMap<>();
 		
+		AppUtil.validateFileFolderPath(csvReadFolderPath);
+		AppUtil.validateFileFolderPath(csvWriteFolderPath);
+		AppUtil.validateFileFolderPath(masterFilePath);
+		
 		List<String> fileNames = getOrderedFileList(masterFilePath);
 
 		for (String fileName : fileNames) {
@@ -76,78 +73,57 @@ public class DataMigrationService {
 				if (Files.exists(filePath)) {
 					String status = processFile(filePath.toFile());
 					fileStatusMap.put(fileName, status);
-					if (status != Constants.PROCESS_SUCCESS)
-						return fileStatusMap;
+					if (!status.equals(Constants.PROCESS_SUCCESS))
+						throw new AppException(status);
 				} else {
-					fileStatusMap.put(fileName, Constants.FILE_NOT_FOUND);
-					return fileStatusMap;
+					throw new AppException(Constants.FILE_NOT_FOUND);
 				}
 				log.info("<-----------> END <-----------> {} <-----------> END <----------->", fileName);
 			} catch (Exception e) {
+				log.error(Constants.FAILURE + " - " + e.getMessage());
+				log.info("<-----------> END <-----------> {} <-----------> END <----------->", fileName);
 				fileStatusMap.put(fileName, Constants.FAILURE + " - " + e.getMessage());
 				return fileStatusMap;
 			}
 		}
-
 		return fileStatusMap;
 	}
 
 	private String processFile(File file) throws Exception {
-		log.info("READING DATA FROM FILE -> {}", file.getName());
-		Reader reader = new FileReader(file);
-		CSVParser parser = CSVFormat.Builder.create()
-				.setHeader()
-				.setSkipHeaderRecord(true)
-				.get()
-				.parse(reader);
-
+		log.info("PROCESSING FILE -> {}", file.getName());
+		Map<Field, String> fieldToCsvHeaderMap = new LinkedHashMap<>();
+		Map<Field, String> newFieldAndHeaderMap = new LinkedHashMap<>();
+		
+		BufferedReader reader = new BufferedReader(new FileReader(file));
+		List<String> csvheaderNames = Arrays.asList(reader.readLine().split(","));
 		String tableName = file.getName().split("\\.")[0];
 		Class<?> entityClass = findEntityClass(entityPackage, tableName);
+		log.info("Table headers(column name) parsed from csv file - {}", csvheaderNames);
+		mapFieldAndCsvHeader(fieldToCsvHeaderMap, newFieldAndHeaderMap, entityClass, csvheaderNames);
+		return processData(reader,fieldToCsvHeaderMap, newFieldAndHeaderMap, csvheaderNames, entityClass, file);
+	}
 
-		log.info("Table headers(column name) parsed from csv file - {}", parser.getHeaderNames());
+	private String processData(BufferedReader reader, Map<Field, String> fieldToCsvHeaderMap, Map<Field, String> newFieldAndHeaderMap,
+			List<String> headerNames, Class<?> entityClass, File file) throws Exception {
 		log.info("Iterating csv records in file");
-		return processData(parser, entityClass, file);
-	}
-
-	private void generateCsvFailedEntries(Map<CSVRecord, String> failedRecordErroMsgMap, List<String> csvHeaders,
-			String fileName) throws IOException {
-		if (!failedRecordErroMsgMap.keySet().isEmpty()) {
-			Writer writer = Files.newBufferedWriter(Paths.get(csvWriteFolderPath + FilenameUtils.getBaseName(fileName) + ".csv"));
-			CSVFormat csvWriteFormat = CSVFormat.Builder.create()
-					.setHeader(csvHeaders.toArray(new String[0]))
-					.setDelimiter(',')
-					.get();
-			CSVPrinter csvPrinter = new CSVPrinter(writer, csvWriteFormat);
-			for (CSVRecord csvRecord : failedRecordErroMsgMap.keySet()) {
-				csvPrinter.printRecord(csvRecord);
-			}
-			csvPrinter.close();
-			
-		    try (BufferedWriter bufferWriter = new BufferedWriter(new FileWriter(csvWriteFolderPath + FilenameUtils.getBaseName(fileName) + "_error_msg.txt"))) {
-		        for (Entry<CSVRecord, String> entry : failedRecordErroMsgMap.entrySet()) {
-		            String line = entry.getKey() + " : " + entry.getValue();
-		            bufferWriter.write(line);
-		            bufferWriter.newLine();
-		        }
-		    } catch (IOException e) {
-		        e.printStackTrace();
-		    }
-		}
-	}
-
-	private String processData(CSVParser parser, Class<?> entityClass, File file) throws Exception {
-		Map<CSVRecord, String> failedRecordErroMsgMap = new HashMap<>();
+		Map<String, String> failedRecordErroMsgMap = new HashMap<>();
 		int count = 0;
-		for (CSVRecord record : parser.getRecords()) {
-			Object entityObj = mapEntityFields(entityClass, record, parser.getHeaderNames());
-			saveToDb(record, entityObj, failedRecordErroMsgMap);
-			logCount(++count);
+		
+		String line = reader.readLine();
+		if (line == null)
+			return Constants.EMPTY_FILE;
+		
+		while (line != null) {
+			Object entityObj = mapEntityFields(entityClass, line, headerNames, fieldToCsvHeaderMap, newFieldAndHeaderMap);
+			saveToDb(line, entityObj, failedRecordErroMsgMap);
+			AppUtil.logCount(++count);
+			line = reader.readLine();
 		}
-
+		
 		log.info("FILE PROCESSED SUCCESFULLY | TOTAL RECORDS : {}", count);
 		log.info("FAILED RECORDS COUNT : {}", failedRecordErroMsgMap.size());
 
-		generateCsvFailedEntries(failedRecordErroMsgMap, parser.getHeaderNames(), file.getName());
+		generateCsvFailedEntries(failedRecordErroMsgMap, headerNames, file.getName());
 
 		if (failedRecordErroMsgMap.isEmpty()) {
 			return Constants.PROCESS_SUCCESS;
@@ -158,57 +134,115 @@ public class DataMigrationService {
 		}
 	}
 
-	private Map<CSVRecord, String> saveToDb(CSVRecord record, Object entityObj, Map<CSVRecord, String> failedRecordErroMsgMap) {
-		log.info("Persisiting data ...");
-		try {
-			migrationDao.save(entityObj);
-		} catch (Exception e) {
-			failedRecordErroMsgMap.put(record, e.toString());
-		}
-		log.info("Data saved");
-		return failedRecordErroMsgMap;
-	}
-
-	private Object mapEntityFields(Class<?> entityClass, CSVRecord record, List<String> headerNames) throws Exception {
+	private Object mapEntityFields(Class<?> entityClass, String line, List<String> headerNames,
+			Map<Field, String> fieldToCsvHeaderMap, Map<Field, String> newFieldAndHeaderMap) throws Exception {
 		Object entityObj = entityClass.getDeclaredConstructor().newInstance();
-		for (String csvHeader : headerNames) {
-			boolean isFieldFound = false;
-
-			for (Field field : entityClass.getDeclaredFields()) {
-
-				if (field.isAnnotationPresent(Column.class)) {
-					if (field.getAnnotation(Column.class).name().equalsIgnoreCase(csvHeader)) {
-						isFieldFound = true;
-						setFieldValue(entityObj, field, record.get(csvHeader));
-						break;
-					} else if (field.getAnnotation(Column.class).name().equalsIgnoreCase("orgInfo")) {
-						isFieldFound = true;
-						setFieldValue(entityObj, field, "Vethaa");
-						break;
-					}
-
-				} else if (field.isAnnotationPresent(JoinColumn.class)) {
-					if (field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase(csvHeader)) {
-						isFieldFound = true;
-						setForeignFieldValue(field, entityObj, record.get(csvHeader), csvHeader);
-						break;
-					} else if (field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase("org_entity_Id")) {
-						isFieldFound = true;
-						setForeignFieldValue(field, entityObj, "2", "org_entity_Id");
-						break;
-					}
-				}
+		Map<String, String> rowData = getRowData(headerNames, line);
+		
+		for (Entry<Field, String> entry : fieldToCsvHeaderMap.entrySet()) {
+			Field field = entry.getKey();
+			String csvHeader = entry.getValue();
+			if (field.isAnnotationPresent(Column.class)) {
+				setFieldValue(entityObj, field, rowData.get(csvHeader));
+			} else if (field.isAnnotationPresent(JoinColumn.class)) {
+				setForeignFieldValue(field, entityObj, rowData.get(csvHeader));
 			}
-
-			if (!isFieldFound) {
-				log.error("Field not found for column header -> {}", csvHeader);
-				throw new Exception("Cant able to identify entity field for csv column header name '" + csvHeader + "' in entity -> " + entityClass.getName());
+		}
+		
+		for (Entry<Field, String> entry : newFieldAndHeaderMap.entrySet()) {
+			Field field = entry.getKey();
+			String csvHeader = entry.getValue();
+			if (field.isAnnotationPresent(Column.class)) {
+				setFieldValue(entityObj, field, getNewFieldVaue(csvHeader));
+			} else if (field.isAnnotationPresent(JoinColumn.class)) {
+				setForeignFieldValue(field, entityObj, getNewFieldVaue(csvHeader));
 			}
 		}
 		return entityObj;
 	}
 
-	private void setForeignFieldValue(Field field, Object entityObj, String value, String csvHeader) throws Exception {
+	private void saveToDb(String line, Object entityObj, Map<String, String> failedRecordErroMsgMap) {
+		try {
+			migrationDao.save(entityObj);
+			log.debug("Data saved");
+		} catch (Exception e) {
+			log.debug("Data saving failed");
+			failedRecordErroMsgMap.put(line, e.toString());
+		}
+	}
+	
+	private void generateCsvFailedEntries(Map<String, String> failedRecordErroMsgMap, List<String> headerNames,
+			String fileName) throws IOException {
+		if (!failedRecordErroMsgMap.keySet().isEmpty()) {
+			try (BufferedWriter bufferWriter = new BufferedWriter(new FileWriter(csvWriteFolderPath + AppUtil.getBaseFileName(fileName) + ".csv"))) {
+				bufferWriter.append(String.join(",", headerNames));
+				bufferWriter.append("\n");
+
+	            for (String failedRows : failedRecordErroMsgMap.keySet()) {
+	            	bufferWriter.append(failedRows);
+	            	bufferWriter.append("\n");
+	            }
+	        }
+	    }
+
+		try (BufferedWriter bufferWriter = new BufferedWriter(new FileWriter(csvWriteFolderPath + AppUtil.getBaseFileName(fileName) + "_error_msg.txt"))) {
+			for (Entry<String, String> entry : failedRecordErroMsgMap.entrySet()) {
+				String line = entry.getKey() + " : " + entry.getValue();
+				bufferWriter.write(line);
+				bufferWriter.newLine();
+			}
+		}
+	}
+
+	private Map<String, String> getRowData(List<String> headerNames, String line) {
+		Map<String, String> rowDataMap = new LinkedHashMap<>();
+		String[] values = line.split(",");
+		for (int i = 0; i < headerNames.size(); i++) {
+			String header = headerNames.get(i);
+			String value = values.length > i ? values[i].trim() : null;
+			rowDataMap.put(header, value);
+		}
+		return rowDataMap;
+	}
+
+	private Map<Field, String> mapFieldAndCsvHeader(Map<Field, String> fieldToHeaderMap, Map<Field, String> newFieldToHeaderMap, Class<?> entityClass, List<String> csvHeaderNames) throws Exception {
+		
+		for (Field field : entityClass.getDeclaredFields()) {
+			boolean fieldFound = false;
+			for (String csvHeaderName: csvHeaderNames) {
+				if ((field.isAnnotationPresent(Column.class) && field.getAnnotation(Column.class).name().equalsIgnoreCase(csvHeaderName))
+						|| (field.isAnnotationPresent(JoinColumn.class) && field.getAnnotation(JoinColumn.class).name().equalsIgnoreCase(csvHeaderName))) {
+					fieldToHeaderMap.put(field, csvHeaderName.toLowerCase());
+					fieldFound = true;
+					break;
+				}
+			}
+			
+			if (!fieldFound) {
+				if (field.isAnnotationPresent(Column.class)) {
+					String columnName = field.getAnnotation(Column.class).name().toLowerCase();
+					if (Constants.NEW_FIELD_NAMES.contains(columnName)) {
+						newFieldToHeaderMap.put(field, columnName.toLowerCase());
+						fieldFound = true;
+					} 
+				} else if (field.isAnnotationPresent(JoinColumn.class)) {
+					String columnName = field.getAnnotation(JoinColumn.class).name().toLowerCase();
+					if (Constants.NEW_FIELD_NAMES.contains(columnName)) {
+						newFieldToHeaderMap.put(field, columnName.toLowerCase());
+						fieldFound = true;
+					}
+				}
+			}
+			
+			if (!fieldFound) {
+				throw new AppException("Cannot map entity field : '" + field.getName() + "' in entity '" + entityClass.getSimpleName() + "'");
+			}
+		}
+		return fieldToHeaderMap;
+
+	}
+
+	private void setForeignFieldValue(Field field, Object entityObj, String value) throws InstantiationException, IllegalAccessException, IllegalArgumentException, InvocationTargetException, NoSuchMethodException, SecurityException {
 		if (Objects.nonNull(value) && StringUtils.isNotBlank(value)) {
 			Class<?> fkEntityClass = field.getType();
 			Object fkEntityObj = fkEntityClass.getDeclaredConstructor().newInstance();
@@ -223,11 +257,10 @@ public class DataMigrationService {
 		}
 	}
 
-	private void setFieldValue(Object entityObj, Field field, String value)
-			throws IllegalArgumentException, IllegalAccessException {
+	private void setFieldValue(Object entityObj, Field field, String value) throws IllegalArgumentException, IllegalAccessException {
 		if (Objects.nonNull(value) && StringUtils.isNotBlank(value)) {
 			field.setAccessible(true);
-			field.set(entityObj, convertDataType(value, field.getType()));
+			field.set(entityObj, AppUtil.convertDataType(value, field.getType()));
 		}
 	}
 
@@ -239,47 +272,6 @@ public class DataMigrationService {
 				.orElseThrow(() -> new Exception("Entity for table name '" + tableName + "' not found"));
 		log.info("Table entity found --> {}", entityClass.getName());
 		return entityClass;
-	}
-
-	private static Object convertDataType(String value, Class<?> type) {
-		if (type == String.class)
-			return value;
-		if (type == Integer.class)
-			return Integer.valueOf(value);
-		if (type == Long.class)
-			return Long.valueOf(value);
-		if (type == Double.class)
-			return Double.valueOf(value);
-		if (type == Boolean.class)
-			return Boolean.valueOf(value);
-		if (type == LocalDate.class)
-			return LocalDate.parse(value, DateTimeFormatter.ofPattern("yyyy-MM-dd"));
-		if (type == LocalDateTime.class)
-			return LocalDateTime.parse(value, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-		return null;
-	}
-
-	private void logCount(int count) {
-		boolean shouldLog = false;
-		if (count < 10) {
-			shouldLog = true;
-		} else if (count <= 25 && count % 5 == 0) {
-			shouldLog = true;
-		} else if (count <= 400 && count % 50 == 0) {
-			shouldLog = true;
-		} else if (count <= 4000 && count % 250 == 0) {
-			shouldLog = true;
-		} else if (count <= 20000 && count % 1000 == 0) {
-			shouldLog = true;
-		} else if (count <= 75000 && count % 2500 == 0) {
-			shouldLog = true;
-		} else if (count % 100000 == 0) {
-			shouldLog = true;
-		}
-
-		if (shouldLog) {
-			log.info("Records processed {} ", count);
-		}
 	}
 
 	private static List<String> getOrderedFileList(String masterFilePath) throws IOException {
@@ -294,9 +286,18 @@ public class DataMigrationService {
 		fileNames.replaceAll(fileName -> fileName + ".csv");
 		return fileNames;
 	}
+	
+	private String getNewFieldVaue(String csvHeader) throws AppException {
+		switch (csvHeader) {
+		case "org_id": {
+			return "1";
+		}
+		default:
+			throw new AppException(Constants.NO_VALUE_FOR_NEW_FIELD + " " + csvHeader);
+		}
+	}
 
 	public <T> void save(T entity) {
 		migrationDao.save(entity);
-
 	}
 }
