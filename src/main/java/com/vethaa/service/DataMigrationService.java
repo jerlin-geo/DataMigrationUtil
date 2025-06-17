@@ -128,7 +128,7 @@ public class DataMigrationService {
 		if (failedRecordErroMsgMap.isEmpty()) {
 			return Constants.PROCESS_SUCCESS;
 		} else if (failedRecordErroMsgMap.size() == count) {
-			return Constants.NO_DATA_INSERTED;
+			return Constants.ALL_DATA_FAILED_INSERTED;
 		} else {
 			return Constants.PARTIAL_DATA_INSERTED;
 		}

@@ -5,7 +5,7 @@ import java.util.List;
 public class Constants {
 
 	public static final String PROCESS_SUCCESS = "ALL DATA INSERTED SUCCESFULLY";
-	public static final String NO_DATA_INSERTED = "NO DATA INSERTED";
+	public static final String ALL_DATA_FAILED_INSERTED = "ALL DATA FAILED TO INSERTED";
 	public static final String PARTIAL_DATA_INSERTED = "PARTIAL DATA INSERTED";
 	public static final String FILE_NOT_FOUND = "FILE NOT FOUND";
 	public static final String FAILURE = "FAILURE";
