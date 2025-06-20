@@ -9,10 +9,10 @@
 		<relativePath/>
 	</parent>
 	<groupId>com.vethaa</groupId>
-	<artifactId>demo</artifactId>
+	<artifactId>MigrationUtil</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>demo</name>
-	<description>Demo project for Spring Boot</description>
+	<description>Data migration utility</description>
 	<url/>
 	<licenses>
 		<license/>

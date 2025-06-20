@@ -96,6 +96,7 @@ public class DataMigrationService {
 		
 		BufferedReader reader = new BufferedReader(new FileReader(file));
 		List<String> csvheaderNames = Arrays.asList(reader.readLine().split(","));
+		csvheaderNames.replaceAll(String::toLowerCase);
 		String tableName = file.getName().split("\\.")[0];
 		Class<?> entityClass = findEntityClass(entityPackage, tableName);
 		log.info("Table headers(column name) parsed from csv file - {}", csvheaderNames);
