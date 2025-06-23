@@ -9,10 +9,10 @@ import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfigurat
 	    JpaRepositoriesAutoConfiguration.class,
 	    HibernateJpaAutoConfiguration.class
 	})
-public class DemoApplication {
+public class DataMigrationApplication {
 
 	public static void main(String[] args) {
-		SpringApplication.run(DemoApplication.class, args);
+		SpringApplication.run(DataMigrationApplication.class, args);
 	}
 
 }
